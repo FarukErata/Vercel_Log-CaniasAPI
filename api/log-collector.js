@@ -1,44 +1,49 @@
 const axios = require('axios');
-const { Pool } = require('pg');
 
 module.exports = async (req, res) => {
   try {
     console.log("Function started");
     
-    // 1. Fetch logs from Vercel API
-    console.log("Fetching logs from Vercel API");
-    const now = new Date();
-    const oneDayAgo = new Date(now - 24 * 60 * 60 * 1000); // 24 hours ago
+    // Print environment variables (sanitized)
+    console.log("PROJECT_ID:", process.env.PROJECT_ID ? "Set" : "Not set");
+    console.log("VERCEL_TOKEN:", process.env.VERCEL_TOKEN ? "Set (length: " + process.env.VERCEL_TOKEN.length + ")" : "Not set");
     
-    const response = await axios.get(`https://api.vercel.com/v2/deployments/${process.env.PROJECT_ID}/events`, {
+    // Test a simpler Vercel API endpoint first
+    console.log("Testing Vercel API with user endpoint");
+    const userResponse = await axios.get("https://api.vercel.com/v2/user", {
       headers: {
         Authorization: `Bearer ${process.env.VERCEL_TOKEN}`
-      },
-      params: {
-        since: oneDayAgo.toISOString(),
-        until: now.toISOString()
       }
     });
     
-    // 2. Process the logs to find SQL queries
-    console.log("Processing logs");
-    const logs = response.data.events || [];
-    console.log(`Found ${logs.length} total logs`);
+    // If we get here, the token is valid
+    console.log("Vercel API auth successful");
     
-    const sqlLogs = logs.filter(log => {
-      return log.text && log.text.includes('Direct query:');
-    });
-    console.log(`Found ${sqlLogs.length} SQL logs`);
-    
-    // Just return the results for now, don't store them
     res.status(200).json({
-      message: "Log fetching successful",
-      totalLogs: logs.length,
-      sqlLogs: sqlLogs.length,
-      firstFewSqlLogs: sqlLogs.slice(0, 3) // Just show first 3 for testing
+      message: "Vercel API auth test successful",
+      user: {
+        username: userResponse.data.user.username,
+        email: userResponse.data.user.email
+      }
     });
   } catch (error) {
     console.error("Function crashed:", error);
+    
+    // More detailed error for API errors
+    if (error.response) {
+      console.error("API Error Response:", {
+        status: error.response.status,
+        data: error.response.data
+      });
+      
+      return res.status(500).json({
+        error: error.message,
+        apiErrorStatus: error.response.status,
+        apiErrorData: error.response.data,
+        stack: error.stack
+      });
+    }
+    
     res.status(500).json({ 
       error: error.message,
       stack: error.stack 
