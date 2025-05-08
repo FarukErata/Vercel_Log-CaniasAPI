@@ -5,7 +5,7 @@ module.exports = async (req, res) => {
   try {
     console.log("Function started");
     
-    // 1. First get deployments for the project
+    // 1. Fetch deployments
     console.log("Fetching deployments");
     const deploymentsResponse = await axios.get("https://api.vercel.com/v1/deployments", {
       headers: {
@@ -13,13 +13,18 @@ module.exports = async (req, res) => {
       },
       params: {
         projectId: process.env.PROJECT_ID,
-        limit: 5 // Get the 5 most recent deployments
+        limit: 10  // Get more deployments
       }
     });
-    console.log(`Found ${process.env.PROJECT_ID} PROPJECT`)
     
     const deployments = deploymentsResponse.data.deployments || [];
     console.log(`Found ${deployments.length} deployments`);
+    console.log(`Project ID being used: ${process.env.PROJECT_ID}`);
+    
+    // Log deployment details
+    deployments.forEach((dep, index) => {
+      console.log(`Deployment ${index + 1}: ${dep.uid || dep.id}, Created: ${new Date(dep.created).toISOString()}`);
+    });
     
     if (deployments.length === 0) {
       return res.status(200).json({
@@ -28,33 +33,89 @@ module.exports = async (req, res) => {
       });
     }
     
-    // 2. Get logs for the most recent deployment
-    const latestDeployment = deployments[0];
-    console.log(`Getting logs for deployment ${latestDeployment.uid || latestDeployment.id}`);
+    // 2. Check multiple deployments for logs
+    let allLogs = [];
+    let deploymentsSummary = [];
     
-    const logsResponse = await axios.get(`https://api.vercel.com/v1/deployments/${latestDeployment.uid || latestDeployment.id}/events`, {
-      headers: {
-        Authorization: `Bearer ${process.env.VERCEL_TOKEN}`
+    // Check up to 5 most recent deployments
+    for (let i = 0; i < Math.min(5, deployments.length); i++) {
+      const deployment = deployments[i];
+      console.log(`Checking logs for deployment ${i + 1}: ${deployment.uid || deployment.id}`);
+      
+      try {
+        const logsResponse = await axios.get(`https://api.vercel.com/v1/deployments/${deployment.uid || deployment.id}/events`, {
+          headers: {
+            Authorization: `Bearer ${process.env.VERCEL_TOKEN}`
+          }
+        });
+        
+        const deploymentLogs = logsResponse.data.events || [];
+        console.log(`Found ${deploymentLogs.length} logs for deployment ${i + 1}`);
+        
+        // Get a sample of log types to understand what we're dealing with
+        if (deploymentLogs.length > 0) {
+          const logSample = deploymentLogs.slice(0, 3);
+          console.log("Log sample for deployment:", 
+            logSample.map(log => ({
+              type: log.type,
+              text: log.text ? (log.text.substring(0, 50) + (log.text.length > 50 ? '...' : '')) : 'No text'
+            }))
+          );
+        }
+        
+        allLogs = [...allLogs, ...deploymentLogs];
+        deploymentsSummary.push({
+          id: deployment.uid || deployment.id,
+          logs: deploymentLogs.length
+        });
+      } catch (error) {
+        console.error(`Error fetching logs for deployment ${deployment.uid || deployment.id}:`, error.message);
+      }
+    }
+    
+    console.log(`Total logs found across all deployments: ${allLogs.length}`);
+    
+    // 3. Try to find SQL logs more generically - check multiple patterns
+    const sqlQueries = [];
+    
+    allLogs.forEach(log => {
+      if (!log.text) return;
+      
+      // Check for various SQL log patterns
+      const patterns = [
+        /Direct query:\s*(.*)/i,
+        /SQL query:\s*(.*)/i,
+        /SELECT\s+.*\s+FROM\s+/i,
+        /INSERT\s+INTO\s+/i,
+        /UPDATE\s+.*\s+SET\s+/i,
+        /DELETE\s+FROM\s+/i
+      ];
+      
+      for (const pattern of patterns) {
+        const match = log.text.match(pattern);
+        if (match) {
+          const query = match[1] || log.text;
+          sqlQueries.push({
+            timestamp: log.timestamp,
+            query: query,
+            fullText: log.text,
+            deployment: log.deploymentId
+          });
+          break; // Stop after finding the first match
+        }
       }
     });
     
-    const logs = logsResponse.data.events || [];
-    console.log(`Found ${logs.length} logs`);
-    
-    // 3. Filter logs for SQL queries
-    const sqlLogs = logs.filter(log => {
-      return log.text && log.text.includes('Direct query:');
-    });
-    console.log(`Found ${sqlLogs.length} SQL logs`);
+    console.log(`Found ${sqlQueries.length} SQL queries across all deployments`);
     
     // 4. Store SQL logs in database
     let storedLogs = 0;
-    if (sqlLogs.length > 0) {
+    if (sqlQueries.length > 0) {
       console.log("Connecting to database");
       const pool = new Pool({
         connectionString: process.env.DATABASE_URL,
         ssl: {
-          rejectUnauthorized: false // Required for Neon's SSL connections
+          rejectUnauthorized: false
         }
       });
       
@@ -70,13 +131,10 @@ module.exports = async (req, res) => {
       `);
       
       console.log("Inserting logs");
-      for (const log of sqlLogs) {
-        const queryMatch = log.text.match(/Direct query: (.*)/);
-        const sqlQuery = queryMatch ? queryMatch[1] : '';
-        
+      for (const log of sqlQueries) {
         await pool.query(
           'INSERT INTO sql_logs (timestamp, query, log_data) VALUES ($1, $2, $3)',
-          [new Date(log.timestamp), sqlQuery, JSON.stringify(log)]
+          [new Date(log.timestamp || Date.now()), log.query, JSON.stringify(log)]
         );
         storedLogs++;
       }
@@ -88,12 +146,13 @@ module.exports = async (req, res) => {
     res.status(200).json({
       success: true,
       deploymentsFound: deployments.length,
-      logsFound: logs.length,
-      sqlLogsFound: sqlLogs.length,
+      totalLogsFound: allLogs.length,
+      deploymentsSummary: deploymentsSummary,
+      sqlLogsFound: sqlQueries.length,
       sqlLogsStored: storedLogs,
-      sampleLogs: sqlLogs.slice(0, 3).map(log => ({
+      sampleLogs: sqlQueries.slice(0, 3).map(log => ({
         timestamp: log.timestamp,
-        text: log.text
+        query: log.query.substring(0, 100) + (log.query.length > 100 ? '...' : '')
       }))
     });
   } catch (error) {
