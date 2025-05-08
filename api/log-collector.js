@@ -4,27 +4,44 @@ module.exports = async (req, res) => {
   try {
     console.log("Function started");
     
-    // Print environment variables (sanitized)
-    console.log("PROJECT_ID:", process.env.PROJECT_ID ? "Set" : "Not set");
-    console.log("VERCEL_TOKEN:", process.env.VERCEL_TOKEN ? "Set (length: " + process.env.VERCEL_TOKEN.length + ")" : "Not set");
+    // 1. First, get a list of deployments
+    console.log("Getting list of deployments");
+    const deploymentsResponse = await axios.get(`https://api.vercel.com/v13/deployments`, {
+      headers: {
+        Authorization: `Bearer ${process.env.VERCEL_TOKEN}`
+      },
+      params: {
+        limit: 5 // Just get a few recent deployments
+      }
+    });
     
-    // Test a simpler Vercel API endpoint first
-    console.log("Testing Vercel API with user endpoint");
-    const userResponse = await axios.get("https://api.vercel.com/v2/user", {
+    const deployments = deploymentsResponse.data.deployments || [];
+    console.log(`Found ${deployments.length} deployments`);
+    
+    if (deployments.length === 0) {
+      return res.status(200).json({
+        message: "No deployments found",
+        success: true
+      });
+    }
+    
+    // 2. Try to get logs for the most recent deployment
+    const latestDeployment = deployments[0];
+    console.log(`Getting logs for deployment ${latestDeployment.uid}`);
+    
+    const logsResponse = await axios.get(`https://api.vercel.com/v2/deployments/${latestDeployment.uid}/events`, {
       headers: {
         Authorization: `Bearer ${process.env.VERCEL_TOKEN}`
       }
     });
     
-    // If we get here, the token is valid
-    console.log("Vercel API auth successful");
+    const logs = logsResponse.data.events || [];
     
     res.status(200).json({
-      message: "Vercel API auth test successful",
-      user: {
-        username: userResponse.data.user.username,
-        email: userResponse.data.user.email
-      }
+      success: true,
+      deploymentId: latestDeployment.uid,
+      totalLogs: logs.length,
+      sampleLogs: logs.slice(0, 3) // Just return first 3 logs as sample
     });
   } catch (error) {
     console.error("Function crashed:", error);
