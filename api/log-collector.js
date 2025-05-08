@@ -5,7 +5,7 @@ module.exports = async (req, res) => {
   try {
     console.log("Function started");
     
-    // 1. Fetch deployments using v1 API
+    // 1. First get deployments for the project
     console.log("Fetching deployments");
     const deploymentsResponse = await axios.get("https://api.vercel.com/v1/deployments", {
       headers: {
@@ -22,12 +22,12 @@ module.exports = async (req, res) => {
     
     if (deployments.length === 0) {
       return res.status(200).json({
-        success: true,
-        message: "No deployments found for this project"
+        success: true, 
+        message: "No deployments found for this project" 
       });
     }
     
-    // 2. Get logs for the most recent deployment using v1 API
+    // 2. Get logs for the most recent deployment
     const latestDeployment = deployments[0];
     console.log(`Getting logs for deployment ${latestDeployment.uid || latestDeployment.id}`);
     
@@ -53,7 +53,7 @@ module.exports = async (req, res) => {
       const pool = new Pool({
         connectionString: process.env.DATABASE_URL,
         ssl: {
-          rejectUnauthorized: false
+          rejectUnauthorized: false // Required for Neon's SSL connections
         }
       });
       
@@ -98,7 +98,6 @@ module.exports = async (req, res) => {
   } catch (error) {
     console.error("Function crashed:", error);
     
-    // More detailed error for API errors
     if (error.response) {
       console.error("API Error Response:", {
         status: error.response.status,
