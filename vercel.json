@@ -1,0 +1,15 @@
+
+{
+    "version": 2,
+    "functions": {
+      "api/log-collector.js": {
+        "memory": 1024
+      }
+    },
+    "crons": [
+      {
+        "path": "/api/log-collector",
+        "schedule": "0 * * * *"
+      }
+    ]
+  }
