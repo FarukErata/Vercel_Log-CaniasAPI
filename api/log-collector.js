@@ -1,64 +1,116 @@
-const { Vercel } = require('@vercel/sdk');
+const axios = require('axios');
 const { Pool } = require('pg');
 
 module.exports = async (req, res) => {
   try {
     console.log("Function started");
     
-    // Initialize Vercel SDK
-    const vercel = new Vercel({
-      bearerToken: process.env.VERCEL_TOKEN,
+    // 1. Fetch deployments
+    console.log("Fetching deployments");
+    const deploymentsResponse = await axios.get("https://api.vercel.com/v1/deployments", {
+      headers: {
+        Authorization: `Bearer ${process.env.VERCEL_TOKEN}`
+      },
+      params: {
+        projectId: process.env.PROJECT_ID,
+        limit: 10  // Get more deployments
+      }
     });
     
-    // Get recent deployments for your main project
-    const deploymentsResponse = await vercel.deployments.getDeployments({
-      limit: 5,
-      projectId: process.env.PROJECT_ID, // The project ID of your main application
+    const deployments = deploymentsResponse.data.deployments || [];
+    console.log(`Found ${deployments.length} deployments`);
+    console.log(`Project ID being used: ${process.env.PROJECT_ID}`);
+    
+    // Log deployment details
+    deployments.forEach((dep, index) => {
+      console.log(`Deployment ${index + 1}: ${dep.uid || dep.id}, Created: ${new Date(dep.created).toISOString()}`);
     });
     
-    console.log(`Found ${deploymentsResponse.deployments.length} deployments`);
-    
-    // Track all SQL logs
-    let allSqlLogs = [];
-    
-    // Process each deployment
-    for (const deployment of deploymentsResponse.deployments) {
-      console.log(`Analyzing deployment: ${deployment.uid}`);
-      
-      // Get logs for this deployment
-      const logsResponse = await vercel.deployments.getDeploymentEvents({
-        idOrUrl: deployment.uid,
+    if (deployments.length === 0) {
+      return res.status(200).json({
+        success: true, 
+        message: "No deployments found for this project" 
       });
+    }
+    
+    // 2. Check multiple deployments for logs
+    let allLogs = [];
+    let deploymentsSummary = [];
+    
+    // Check up to 5 most recent deployments
+    for (let i = 0; i < Math.min(5, deployments.length); i++) {
+      const deployment = deployments[i];
+      console.log(`Checking logs for deployment ${i + 1}: ${deployment.uid || deployment.id}`);
       
-      // Check if we got logs back
-      if (Array.isArray(logsResponse)) {
-        const logs = logsResponse;
-        console.log(`Found ${logs.length} logs for deployment ${deployment.uid}`);
+      try {
+        const logsResponse = await axios.get(`https://api.vercel.com/v1/deployments/${deployment.uid || deployment.id}/events`, {
+          headers: {
+            Authorization: `Bearer ${process.env.VERCEL_TOKEN}`
+          }
+        });
         
-        // Filter for SQL queries
-        const sqlLogs = logs.filter(log => 
-          log.text && (
-            log.text.includes('Direct query:') || 
-            log.text.includes('SQL query:') ||
-            /SELECT\s+.*\s+FROM\s+/i.test(log.text) ||
-            /INSERT\s+INTO\s+/i.test(log.text) ||
-            /UPDATE\s+.*\s+SET\s+/i.test(log.text) ||
-            /DELETE\s+FROM\s+/i.test(log.text)
-          )
-        );
+        const deploymentLogs = logsResponse.data.events || [];
+        console.log(`Found ${deploymentLogs.length} logs for deployment ${i + 1}`);
         
-        console.log(`Found ${sqlLogs.length} SQL logs in this deployment`);
-        allSqlLogs = [...allSqlLogs, ...sqlLogs];
-      } else {
-        console.log(`No logs found for deployment ${deployment.uid}`);
+        // Get a sample of log types to understand what we're dealing with
+        if (deploymentLogs.length > 0) {
+          const logSample = deploymentLogs.slice(0, 3);
+          console.log("Log sample for deployment:", 
+            logSample.map(log => ({
+              type: log.type,
+              text: log.text ? (log.text.substring(0, 50) + (log.text.length > 50 ? '...' : '')) : 'No text'
+            }))
+          );
+        }
+        
+        allLogs = [...allLogs, ...deploymentLogs];
+        deploymentsSummary.push({
+          id: deployment.uid || deployment.id,
+          logs: deploymentLogs.length
+        });
+      } catch (error) {
+        console.error(`Error fetching logs for deployment ${deployment.uid || deployment.id}:`, error.message);
       }
     }
     
-    console.log(`Total SQL logs found: ${allSqlLogs.length}`);
+    console.log(`Total logs found across all deployments: ${allLogs.length}`);
     
-    // Store logs in database if we found any
+    // 3. Try to find SQL logs more generically - check multiple patterns
+    const sqlQueries = [];
+    
+    allLogs.forEach(log => {
+      if (!log.text) return;
+      
+      // Check for various SQL log patterns
+      const patterns = [
+        /Direct query:\s*(.*)/i,
+        /SQL query:\s*(.*)/i,
+        /SELECT\s+.*\s+FROM\s+/i,
+        /INSERT\s+INTO\s+/i,
+        /UPDATE\s+.*\s+SET\s+/i,
+        /DELETE\s+FROM\s+/i
+      ];
+      
+      for (const pattern of patterns) {
+        const match = log.text.match(pattern);
+        if (match) {
+          const query = match[1] || log.text;
+          sqlQueries.push({
+            timestamp: log.timestamp,
+            query: query,
+            fullText: log.text,
+            deployment: log.deploymentId
+          });
+          break; // Stop after finding the first match
+        }
+      }
+    });
+    
+    console.log(`Found ${sqlQueries.length} SQL queries across all deployments`);
+    
+    // 4. Store SQL logs in database
     let storedLogs = 0;
-    if (allSqlLogs.length > 0) {
+    if (sqlQueries.length > 0) {
       console.log("Connecting to database");
       const pool = new Pool({
         connectionString: process.env.DATABASE_URL,
@@ -79,21 +131,10 @@ module.exports = async (req, res) => {
       `);
       
       console.log("Inserting logs");
-      for (const log of allSqlLogs) {
-        // Extract the SQL query from the log text
-        let sqlQuery = log.text;
-        const directQueryMatch = log.text.match(/Direct query:\s*(.*)/i);
-        const sqlQueryMatch = log.text.match(/SQL query:\s*(.*)/i);
-        
-        if (directQueryMatch) {
-          sqlQuery = directQueryMatch[1];
-        } else if (sqlQueryMatch) {
-          sqlQuery = sqlQueryMatch[1];
-        }
-        
+      for (const log of sqlQueries) {
         await pool.query(
           'INSERT INTO sql_logs (timestamp, query, log_data) VALUES ($1, $2, $3)',
-          [new Date(log.created), sqlQuery, JSON.stringify(log)]
+          [new Date(log.timestamp || Date.now()), log.query, JSON.stringify(log)]
         );
         storedLogs++;
       }
@@ -104,16 +145,33 @@ module.exports = async (req, res) => {
     
     res.status(200).json({
       success: true,
-      deploymentsFound: deploymentsResponse.deployments.length,
-      sqlLogsFound: allSqlLogs.length,
+      deploymentsFound: deployments.length,
+      totalLogsFound: allLogs.length,
+      deploymentsSummary: deploymentsSummary,
+      sqlLogsFound: sqlQueries.length,
       sqlLogsStored: storedLogs,
-      sampleLogs: allSqlLogs.slice(0, 3).map(log => ({
-        timestamp: new Date(log.created).toISOString(),
-        text: log.text
+      sampleLogs: sqlQueries.slice(0, 3).map(log => ({
+        timestamp: log.timestamp,
+        query: log.query.substring(0, 100) + (log.query.length > 100 ? '...' : '')
       }))
     });
   } catch (error) {
     console.error("Function crashed:", error);
+    
+    if (error.response) {
+      console.error("API Error Response:", {
+        status: error.response.status,
+        data: error.response.data
+      });
+      
+      return res.status(500).json({
+        error: error.message,
+        apiErrorStatus: error.response.status,
+        apiErrorData: error.response.data,
+        stack: error.stack
+      });
+    }
+    
     res.status(500).json({ 
       error: error.message,
       stack: error.stack 
