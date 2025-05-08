@@ -1,14 +1,29 @@
 const axios = require('axios');
+const { Pool } = require('pg');
 
 module.exports = async (req, res) => {
   try {
-    // Just test if we can use axios 
+    // Test database connection
+    const pool = new Pool({
+      connectionString: process.env.DATABASE_URL,
+      ssl: {
+        rejectUnauthorized: false
+      }
+    });
+    
+    // Simple query to test connection
+    const result = await pool.query('SELECT NOW()');
+    await pool.end();
+    
     res.status(200).json({
-      message: "Log collector with axios is working",
+      message: "Database connection successful",
       timestamp: new Date().toISOString(),
-      axios_version: axios.VERSION || "axios loaded"
+      db_time: result.rows[0].now
     });
   } catch (error) {
-    res.status(500).json({ error: error.message });
+    res.status(500).json({ 
+      error: error.message,
+      stack: error.stack 
+    });
   }
 };
