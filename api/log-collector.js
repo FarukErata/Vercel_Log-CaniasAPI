@@ -16,7 +16,7 @@ module.exports = async (req, res) => {
         limit: 5 // Get the 5 most recent deployments
       }
     });
-    console.log(`Found ${PROJECT_ID} PROPJECT`)
+    console.log(`Found ${process.env.PROJECT_ID} PROPJECT`)
     
     const deployments = deploymentsResponse.data.deployments || [];
     console.log(`Found ${deployments.length} deployments`);
